@@ -303,7 +303,10 @@ def chat():
             
         return jsonify({"response": response})
     except Exception as e:
-        return jsonify({"response": f"Error: {str(e)}"}), 500
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Chat error: {error_details}")  # This will show in Render logs
+        return jsonify({"response": f"Error: {str(e)}\n\nDetails: {error_details[:500]}"}), 500
 
 
 def call_openai(message: str, model: str, history: list, api_key: str) -> str:
