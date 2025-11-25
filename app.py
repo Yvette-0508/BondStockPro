@@ -268,10 +268,11 @@ def get_asset_class(symbol: str) -> str:
 @app.route("/api/chat", methods=["POST"])
 def chat():
     """
-    Chatbot API endpoint - supports GPT-4 and DeepSeek.
+    Chatbot API endpoint - supports DeepSeek, Qwen3-Max, and GPT-4.
     Configure API keys in Render environment variables:
-    - OPENAI_API_KEY for GPT-4
     - DEEPSEEK_API_KEY for DeepSeek
+    - DASHSCOPE_API_KEY for Qwen3-Max
+    - OPENAI_API_KEY for GPT-4
     """
     import traceback
     
@@ -282,15 +283,20 @@ def chat():
     
     try:
         if model == "gpt-4":
-            openai_key = os.environ.get("OPENAI_API_KEY")
-            if not openai_key:
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if not api_key:
                 return jsonify({"response": "⚠️ OpenAI API key not configured. Add OPENAI_API_KEY to Render environment variables."})
-            response = call_openai(message, history, openai_key)
+            response = call_openai(message, history, api_key)
+        elif model == "qwen3-max":
+            api_key = os.environ.get("DASHSCOPE_API_KEY")
+            if not api_key:
+                return jsonify({"response": "⚠️ DashScope API key not configured. Add DASHSCOPE_API_KEY to Render environment variables."})
+            response = call_qwen(message, history, api_key)
         else:  # DeepSeek (default)
-            deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
-            if not deepseek_key:
+            api_key = os.environ.get("DEEPSEEK_API_KEY")
+            if not api_key:
                 return jsonify({"response": "⚠️ DeepSeek API key not configured. Add DEEPSEEK_API_KEY to Render environment variables."})
-            response = call_deepseek(message, history, deepseek_key)
+            response = call_deepseek(message, history, api_key)
         
         return jsonify({"response": response})
     except Exception as e:
@@ -341,6 +347,32 @@ def call_deepseek(message: str, history: list, api_key: str) -> str:
         },
         json={
             "model": "deepseek-chat",
+            "messages": messages,
+            "max_tokens": 500,
+            "temperature": 0.7
+        },
+        timeout=60
+    )
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"]
+
+
+def call_qwen(message: str, history: list, api_key: str) -> str:
+    """Call Qwen3-Max via Alibaba DashScope API (OpenAI-compatible)"""
+    import requests
+    
+    messages = [{"role": "system", "content": "You are a helpful portfolio assistant that helps users understand their investments, market trends, and trading strategies. Be concise and helpful."}]
+    messages.extend([{"role": m["role"], "content": m["content"]} for m in history[-10:]])
+    messages.append({"role": "user", "content": message})
+    
+    response = requests.post(
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "qwen-max",
             "messages": messages,
             "max_tokens": 500,
             "temperature": 0.7
