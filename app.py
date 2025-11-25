@@ -268,23 +268,30 @@ def get_asset_class(symbol: str) -> str:
 @app.route("/api/chat", methods=["POST"])
 def chat():
     """
-    Chatbot API endpoint - GPT-4 only.
-    Configure OPENAI_API_KEY in Render environment variables.
+    Chatbot API endpoint - supports GPT-4 and DeepSeek.
+    Configure API keys in Render environment variables:
+    - OPENAI_API_KEY for GPT-4
+    - DEEPSEEK_API_KEY for DeepSeek
     """
     import traceback
     
     data = request.get_json()
     message = data.get("message", "")
+    model = data.get("model", "deepseek")  # Default to DeepSeek
     history = data.get("history", [])
     
-    # Get OpenAI API key
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    
-    if not openai_key:
-        return jsonify({"response": "⚠️ OpenAI API key not configured. Please add OPENAI_API_KEY to your Render environment variables."})
-    
     try:
-        response = call_openai(message, history, openai_key)
+        if model == "gpt-4":
+            openai_key = os.environ.get("OPENAI_API_KEY")
+            if not openai_key:
+                return jsonify({"response": "⚠️ OpenAI API key not configured. Add OPENAI_API_KEY to Render environment variables."})
+            response = call_openai(message, history, openai_key)
+        else:  # DeepSeek (default)
+            deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
+            if not deepseek_key:
+                return jsonify({"response": "⚠️ DeepSeek API key not configured. Add DEEPSEEK_API_KEY to Render environment variables."})
+            response = call_deepseek(message, history, deepseek_key)
+        
         return jsonify({"response": response})
     except Exception as e:
         error_details = traceback.format_exc()
@@ -308,6 +315,32 @@ def call_openai(message: str, history: list, api_key: str) -> str:
         },
         json={
             "model": "gpt-4",
+            "messages": messages,
+            "max_tokens": 500,
+            "temperature": 0.7
+        },
+        timeout=60
+    )
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"]
+
+
+def call_deepseek(message: str, history: list, api_key: str) -> str:
+    """Call DeepSeek API (OpenAI-compatible)"""
+    import requests
+    
+    messages = [{"role": "system", "content": "You are a helpful portfolio assistant that helps users understand their investments, market trends, and trading strategies. Be concise and helpful."}]
+    messages.extend([{"role": m["role"], "content": m["content"]} for m in history[-10:]])
+    messages.append({"role": "user", "content": message})
+    
+    response = requests.post(
+        "https://api.deepseek.com/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "deepseek-chat",
             "messages": messages,
             "max_tokens": 500,
             "temperature": 0.7

@@ -6,7 +6,7 @@
 class ChatbotWidget {
     constructor() {
         this.isOpen = false;
-        this.currentModel = 'gpt-4';  // Fixed to GPT-4 only
+        this.currentModel = 'deepseek';  // Default to DeepSeek
         this.messages = [];
         this.isTyping = false;
         
@@ -34,8 +34,11 @@ class ChatbotWidget {
                             <span id="chatbot-status">Online</span>
                         </div>
                     </div>
-                    <div class="model-badge-header">
-                        <span style="background: rgba(255,255,255,0.15); padding: 6px 12px; border-radius: 6px; font-size: 12px; color: white;">GPT-4</span>
+                    <div class="model-selector">
+                        <select id="model-select">
+                            <option value="deepseek" selected>DeepSeek</option>
+                            <option value="gpt-4">GPT-4</option>
+                        </select>
                     </div>
                 </div>
                 
@@ -70,6 +73,7 @@ class ChatbotWidget {
         this.messagesContainer = container.querySelector('#chatbot-messages');
         this.textarea = container.querySelector('#chatbot-textarea');
         this.sendBtn = container.querySelector('#chatbot-send');
+        this.modelSelect = container.querySelector('#model-select');
         this.chatIcon = container.querySelector('#chat-icon');
         this.closeIcon = container.querySelector('#close-icon');
         this.statusEl = container.querySelector('#chatbot-status');
@@ -94,6 +98,11 @@ class ChatbotWidget {
         this.textarea.addEventListener('input', () => {
             this.textarea.style.height = 'auto';
             this.textarea.style.height = Math.min(this.textarea.scrollHeight, 120) + 'px';
+        });
+        
+        // Model change
+        this.modelSelect.addEventListener('change', (e) => {
+            this.currentModel = e.target.value;
         });
     }
     
