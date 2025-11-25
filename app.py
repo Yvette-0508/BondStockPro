@@ -306,29 +306,32 @@ def chat():
 
 
 def call_openai(message: str, history: list, api_key: str) -> str:
-    """Call OpenAI GPT-4 API"""
+    """Call OpenAI GPT-5.1 API"""
     import requests
     
-    messages = [{"role": "system", "content": "You are a helpful portfolio assistant that helps users understand their investments, market trends, and trading strategies. Be concise and helpful."}]
-    messages.extend([{"role": m["role"], "content": m["content"]} for m in history[-10:]])
-    messages.append({"role": "user", "content": message})
+    # Build conversation context
+    context = "You are a helpful portfolio assistant that helps users understand their investments, market trends, and trading strategies. Be concise and helpful.\n\n"
+    for m in history[-10:]:
+        role = "User" if m["role"] == "user" else "Assistant"
+        context += f"{role}: {m['content']}\n"
+    context += f"User: {message}"
     
     response = requests.post(
-        "https://api.openai.com/v1/chat/completions",
+        "https://api.openai.com/v1/responses",
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         },
         json={
-            "model": "gpt-4",
-            "messages": messages,
-            "max_tokens": 500,
-            "temperature": 0.7
+            "model": "gpt-5.1",
+            "input": context,
+            "reasoning": {"effort": "low"},
+            "text": {"verbosity": "low"}
         },
-        timeout=60
+        timeout=90
     )
     response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
+    return response.json()["output_text"]
 
 
 def call_deepseek(message: str, history: list, api_key: str) -> str:
