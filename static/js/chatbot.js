@@ -36,7 +36,7 @@ class ChatbotWidget {
                     </div>
                     <div class="model-selector">
                         <select id="model-select">
-                            <option value="deepseek" selected>DeepSeek</option>
+                            <option value="deepseek" selected>DeepSeek V3.2</option>
                             <option value="qwen3-max">Qwen3-Max</option>
                             <option value="gpt-4">GPT-4</option>
                         </select>

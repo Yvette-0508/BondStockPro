@@ -332,7 +332,7 @@ def call_openai(message: str, history: list, api_key: str) -> str:
 
 
 def call_deepseek(message: str, history: list, api_key: str) -> str:
-    """Call DeepSeek API (OpenAI-compatible)"""
+    """Call DeepSeek V3.2-Exp API (OpenAI-compatible)"""
     import requests
     
     messages = [{"role": "system", "content": "You are a helpful portfolio assistant that helps users understand their investments, market trends, and trading strategies. Be concise and helpful."}]
@@ -346,12 +346,12 @@ def call_deepseek(message: str, history: list, api_key: str) -> str:
             "Content-Type": "application/json"
         },
         json={
-            "model": "deepseek-chat",
+            "model": "deepseek-chat",  # DeepSeek V3.2-Exp (latest)
             "messages": messages,
-            "max_tokens": 500,
+            "max_tokens": 1024,
             "temperature": 0.7
         },
-        timeout=60
+        timeout=90
     )
     response.raise_for_status()
     return response.json()["choices"][0]["message"]["content"]
