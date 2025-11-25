@@ -268,52 +268,35 @@ def get_asset_class(symbol: str) -> str:
 @app.route("/api/chat", methods=["POST"])
 def chat():
     """
-    Chatbot API endpoint supporting multiple AI models.
-    Configure your API keys as environment variables:
-    - OPENAI_API_KEY for GPT models
-    - ANTHROPIC_API_KEY for Claude models
-    - GOOGLE_API_KEY for Gemini models
+    Chatbot API endpoint - GPT-4 only.
+    Configure OPENAI_API_KEY in Render environment variables.
     """
+    import traceback
+    
     data = request.get_json()
     message = data.get("message", "")
-    model = data.get("model", "gpt-4")
     history = data.get("history", [])
     
-    # Get API keys from environment
+    # Get OpenAI API key
     openai_key = os.environ.get("OPENAI_API_KEY")
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    google_key = os.environ.get("GOOGLE_API_KEY")
+    
+    if not openai_key:
+        return jsonify({"response": "⚠️ OpenAI API key not configured. Please add OPENAI_API_KEY to your Render environment variables."})
     
     try:
-        # Route to appropriate model
-        if model.startswith("gpt"):
-            if not openai_key:
-                return jsonify({"response": "⚠️ OpenAI API key not configured. Please add OPENAI_API_KEY to your environment variables on Render."})
-            response = call_openai(message, model, history, openai_key)
-        elif model.startswith("claude"):
-            if not anthropic_key:
-                return jsonify({"response": "⚠️ Anthropic API key not configured. Please add ANTHROPIC_API_KEY to your environment variables on Render."})
-            response = call_anthropic(message, model, history, anthropic_key)
-        elif model.startswith("gemini"):
-            if not google_key:
-                return jsonify({"response": "⚠️ Google API key not configured. Please add GOOGLE_API_KEY to your environment variables on Render."})
-            response = call_gemini(message, model, history, google_key)
-        else:
-            response = get_fallback_response(message)
-            
+        response = call_openai(message, history, openai_key)
         return jsonify({"response": response})
     except Exception as e:
-        import traceback
         error_details = traceback.format_exc()
-        print(f"Chat error: {error_details}")  # This will show in Render logs
-        return jsonify({"response": f"Error: {str(e)}\n\nDetails: {error_details[:500]}"}), 500
+        print(f"Chat error: {error_details}")
+        return jsonify({"response": f"Error: {str(e)}"}), 500
 
 
-def call_openai(message: str, model: str, history: list, api_key: str) -> str:
-    """Call OpenAI API"""
+def call_openai(message: str, history: list, api_key: str) -> str:
+    """Call OpenAI GPT-4 API"""
     import requests
     
-    messages = [{"role": "system", "content": "You are a helpful portfolio assistant that helps users understand their investments, market trends, and trading strategies."}]
+    messages = [{"role": "system", "content": "You are a helpful portfolio assistant that helps users understand their investments, market trends, and trading strategies. Be concise and helpful."}]
     messages.extend([{"role": m["role"], "content": m["content"]} for m in history[-10:]])
     messages.append({"role": "user", "content": message})
     
@@ -324,152 +307,15 @@ def call_openai(message: str, model: str, history: list, api_key: str) -> str:
             "Content-Type": "application/json"
         },
         json={
-            "model": model,
+            "model": "gpt-4",
             "messages": messages,
             "max_tokens": 500,
             "temperature": 0.7
         },
-        timeout=30
-    )
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
-
-
-def call_anthropic(message: str, model: str, history: list, api_key: str) -> str:
-    """Call Anthropic Claude API with MCP-style tools"""
-    import requests
-    from chat_tools import PORTFOLIO_TOOLS, execute_tool
-    
-    model_map = {
-        "claude-3-opus": "claude-3-opus-20240229",
-        "claude-3-sonnet": "claude-3-sonnet-20240229"
-    }
-    
-    messages = [{"role": m["role"], "content": m["content"]} for m in history[-10:]]
-    messages.append({"role": "user", "content": message})
-    
-    system_prompt = """You are a helpful portfolio assistant with access to real-time portfolio data tools.
-
-You can use these tools to answer questions about the user's investments:
-- get_account_summary: Get account balances, equity, cash, and daily P&L
-- get_positions: Get current stock/ETF holdings
-- get_portfolio_performance: Get returns, volatility, Sharpe ratio, max drawdown
-- get_asset_allocation: Get diversification breakdown by asset class
-- get_stock_quote: Get current price for any symbol
-- get_recent_orders: Get recent trade history
-- compare_to_benchmark: Compare portfolio returns vs SPY, QQQ, etc.
-
-ALWAYS use tools to get real data when answering questions about the portfolio. Be concise and format numbers nicely."""
-
-    # First API call - may request tool use
-    response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": api_key,
-            "Content-Type": "application/json",
-            "anthropic-version": "2023-06-01"
-        },
-        json={
-            "model": model_map.get(model, "claude-3-5-sonnet-20241022"),
-            "max_tokens": 1024,
-            "system": system_prompt,
-            "tools": PORTFOLIO_TOOLS,
-            "messages": messages
-        },
         timeout=60
     )
     response.raise_for_status()
-    result = response.json()
-    
-    # Check if Claude wants to use tools
-    if result.get("stop_reason") == "tool_use":
-        # Process tool calls
-        tool_results = []
-        assistant_content = result["content"]
-        
-        for block in assistant_content:
-            if block.get("type") == "tool_use":
-                tool_name = block["name"]
-                tool_input = block["input"]
-                tool_id = block["id"]
-                
-                # Execute the tool
-                tool_result = execute_tool(tool_name, tool_input)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_id,
-                    "content": tool_result
-                })
-        
-        # Send tool results back to Claude
-        messages.append({"role": "assistant", "content": assistant_content})
-        messages.append({"role": "user", "content": tool_results})
-        
-        # Second API call with tool results
-        response2 = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01"
-            },
-            json={
-                "model": model_map.get(model, "claude-3-5-sonnet-20241022"),
-                "max_tokens": 1024,
-                "system": system_prompt,
-                "tools": PORTFOLIO_TOOLS,
-                "messages": messages
-            },
-            timeout=60
-        )
-        response2.raise_for_status()
-        result = response2.json()
-    
-    # Extract text response
-    for block in result["content"]:
-        if block.get("type") == "text":
-            return block["text"]
-    
-    return "I processed your request but couldn't generate a response."
-
-
-def call_gemini(message: str, model: str, history: list, api_key: str) -> str:
-    """Call Google Gemini API"""
-    import requests
-    
-    contents = []
-    for m in history[-10:]:
-        role = "user" if m["role"] == "user" else "model"
-        contents.append({"role": role, "parts": [{"text": m["content"]}]})
-    contents.append({"role": "user", "parts": [{"text": message}]})
-    
-    response = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={api_key}",
-        headers={"Content-Type": "application/json"},
-        json={
-            "contents": contents,
-            "generationConfig": {
-                "maxOutputTokens": 500,
-                "temperature": 0.7
-            }
-        },
-        timeout=30
-    )
-    response.raise_for_status()
-    return response.json()["candidates"][0]["content"]["parts"][0]["text"]
-
-
-def get_fallback_response(message: str) -> str:
-    """Fallback responses when no API is configured"""
-    message_lower = message.lower()
-    
-    if any(word in message_lower for word in ["hello", "hi", "hey"]):
-        return "Hello! I'm your portfolio assistant. I can help you with questions about your investments, but I need an AI model API key to be configured first. Please add your OpenAI, Anthropic, or Google API key to the Render environment variables."
-    
-    if any(word in message_lower for word in ["portfolio", "stock", "bond", "invest"]):
-        return "I'd love to help you analyze your portfolio! To enable full AI capabilities, please configure one of the following API keys in your Render environment:\n\n• OPENAI_API_KEY - for GPT-4/GPT-3.5\n• ANTHROPIC_API_KEY - for Claude\n• GOOGLE_API_KEY - for Gemini"
-    
-    return "I'm currently running in limited mode. To unlock full AI capabilities, please add your preferred AI model's API key (OpenAI, Anthropic, or Google) to your Render environment variables."
+    return response.json()["choices"][0]["message"]["content"]
 
 
 @app.route("/api/risk-metrics")

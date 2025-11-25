@@ -6,7 +6,7 @@
 class ChatbotWidget {
     constructor() {
         this.isOpen = false;
-        this.currentModel = 'gpt-4';
+        this.currentModel = 'gpt-4';  // Fixed to GPT-4 only
         this.messages = [];
         this.isTyping = false;
         
@@ -34,15 +34,8 @@ class ChatbotWidget {
                             <span id="chatbot-status">Online</span>
                         </div>
                     </div>
-                    <div class="model-selector">
-                        <select id="model-select">
-                            <option value="gpt-4">GPT-4</option>
-                            <option value="gpt-3.5-turbo">GPT-3.5</option>
-                            <option value="claude-3-opus">Claude 3</option>
-                            <option value="claude-3-sonnet">Claude Sonnet</option>
-                            <option value="gemini-pro">Gemini Pro</option>
-                            <option value="llama-3">Llama 3</option>
-                        </select>
+                    <div class="model-badge-header">
+                        <span style="background: rgba(255,255,255,0.15); padding: 6px 12px; border-radius: 6px; font-size: 12px; color: white;">GPT-4</span>
                     </div>
                 </div>
                 
@@ -77,7 +70,6 @@ class ChatbotWidget {
         this.messagesContainer = container.querySelector('#chatbot-messages');
         this.textarea = container.querySelector('#chatbot-textarea');
         this.sendBtn = container.querySelector('#chatbot-send');
-        this.modelSelect = container.querySelector('#model-select');
         this.chatIcon = container.querySelector('#chat-icon');
         this.closeIcon = container.querySelector('#close-icon');
         this.statusEl = container.querySelector('#chatbot-status');
@@ -102,12 +94,6 @@ class ChatbotWidget {
         this.textarea.addEventListener('input', () => {
             this.textarea.style.height = 'auto';
             this.textarea.style.height = Math.min(this.textarea.scrollHeight, 120) + 'px';
-        });
-        
-        // Model change
-        this.modelSelect.addEventListener('change', (e) => {
-            this.currentModel = e.target.value;
-            this.addSystemMessage(`Switched to ${this.getModelDisplayName(this.currentModel)}`);
         });
     }
     
