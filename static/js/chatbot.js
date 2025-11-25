@@ -1,6 +1,6 @@
 /**
  * Chatbot Widget with Multi-Model Support
- * Supports: GPT-4, GPT-3.5, Claude, Gemini
+ * Supports: GPT-5.1, GPT-3.5, Claude, Gemini
  */
 
 class ChatbotWidget {
@@ -38,7 +38,7 @@ class ChatbotWidget {
                         <select id="model-select">
                             <option value="deepseek" selected>DeepSeek V3.2</option>
                             <option value="qwen3-max">Qwen3-Max</option>
-                            <option value="gpt-4">GPT-4</option>
+                            <option value="gpt-5.1">GPT-5.1</option>
                         </select>
                     </div>
                 </div>
@@ -258,7 +258,7 @@ class ChatbotWidget {
     
     getModelDisplayName(model) {
         const names = {
-            'gpt-4': 'GPT-4',
+            'gpt-5.1': 'GPT-5.1',
             'gpt-3.5-turbo': 'GPT-3.5',
             'claude-3-opus': 'Claude 3 Opus',
             'claude-3-sonnet': 'Claude 3 Sonnet',
