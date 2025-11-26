@@ -68,7 +68,7 @@ def portfolio_history(period: str = "1M"):
     accounts = load_accounts_from_config()
     if not accounts:
         return jsonify({"error": "No accounts configured"}), 404
-
+    
     histories = []
     for account in accounts:
         rest = get_rest_client(account)
@@ -126,7 +126,7 @@ def account_summary():
             })
         except Exception as e:
             summaries.append({"name": account["name"], "error": str(e)})
-    
+        
     # Add SPY benchmark
     if rest:
         try:
@@ -149,7 +149,7 @@ def risk_metrics():
                  "VNQ": "Real Estate", "GLD": "Commodities"}
     allocation = {"Equity": 0.0, "Fixed Income": 0.0, "Real Estate": 0.0, "Commodities": 0.0, "Other": 0.0, "Cash": 0.0}
     all_positions = []
-
+    
     for account in load_accounts_from_config():
         rest = get_rest_client(account)
         try:
@@ -160,11 +160,11 @@ def risk_metrics():
                 cls = ASSET_MAP.get(pos.symbol, "Other")
                 allocation[cls] += mv
                 all_positions.append({"symbol": pos.symbol, "market_value": mv,
-                                      "pl_pct": float(pos.unrealized_plpc) * 100,
+                    "pl_pct": float(pos.unrealized_plpc) * 100,
                                       "pl_day_pct": float(pos.change_today) * 100, "account": account["name"]})
         except Exception:
             pass
-
+    
     return jsonify({
         "allocation": allocation,
         "top_gainers": sorted(all_positions, key=lambda x: x["pl_day_pct"], reverse=True)[:5],
@@ -174,7 +174,8 @@ def risk_metrics():
 
 # ============== Chatbot with Function Calling ==============
 
-ALPACA_TOOLS = [
+AGENT_TOOLS = [
+    # Trading tools
     {"type": "function", "function": {"name": "get_account_info", "description": "Get account balance, equity, cash, buying power, and daily P/L",
         "parameters": {"type": "object", "properties": {"account_name": {"type": "string"}}, "required": []}}},
     {"type": "function", "function": {"name": "get_positions", "description": "Get all current stock positions/holdings with quantities, prices, and P/L",
@@ -186,7 +187,13 @@ ALPACA_TOOLS = [
     {"type": "function", "function": {"name": "get_orders", "description": "Get recent orders",
         "parameters": {"type": "object", "properties": {"status": {"type": "string", "enum": ["open", "closed", "all"]}}, "required": []}}},
     {"type": "function", "function": {"name": "get_market_status", "description": "Check if the stock market is open or closed",
-        "parameters": {"type": "object", "properties": {}, "required": []}}}
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    # Web search tool
+    {"type": "function", "function": {"name": "web_search", "description": "Search the web for current news, market analysis, company info, or any topic. Use this for questions about recent events, stock analysis, or information not in your training data.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Search query - be specific and detailed"},
+            "num_results": {"type": "integer", "description": "Number of results (default 5, max 10)"}
+        }, "required": ["query"]}}}
 ]
 
 
@@ -271,18 +278,48 @@ def execute_tool(name: str, args: dict) -> str:
         except Exception as e:
             return f"Error: {e}"
 
+    elif name == "web_search":
+        exa_key = os.environ.get("EXA_API_KEY")
+        if not exa_key:
+            return "Web search not available (EXA_API_KEY not configured)"
+        try:
+            query = args.get("query", "")
+            num_results = min(args.get("num_results", 5), 10)
+            resp = requests.post(
+                "https://api.exa.ai/search",
+                headers={"x-api-key": exa_key, "Content-Type": "application/json"},
+                json={"query": query, "num_results": num_results, "type": "auto", "contents": {"text": {"max_characters": 1000}}},
+                timeout=30
+            )
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+            if not results:
+                return f"No results found for: {query}"
+            output = [f"🔍 Search results for: {query}\n"]
+            for i, r in enumerate(results, 1):
+                title = r.get("title", "No title")
+                url = r.get("url", "")
+                text = r.get("text", "")[:500] + "..." if len(r.get("text", "")) > 500 else r.get("text", "")
+                output.append(f"{i}. **{title}**\n   {url}\n   {text}\n")
+            return "\n".join(output)
+        except Exception as e:
+            return f"Search error: {e}"
+
     return f"Unknown tool: {name}"
 
 
 def call_llm_with_tools(message: str, history: list, api_key: str, api_url: str, model: str) -> str:
     """Unified LLM caller with function calling for DeepSeek/Qwen"""
-    system = "You are a portfolio assistant with trading tools. Use them when needed. Be concise."
+    system = """You are a portfolio assistant with trading and web search tools. 
+Use trading tools for account info, positions, quotes, orders. 
+Use web_search for market news, stock analysis, company research, or any current information.
+Be concise and helpful."""
     messages = [{"role": "system", "content": system}]
     messages.extend([{"role": m["role"], "content": m["content"]} for m in history[-10:]])
     messages.append({"role": "user", "content": message})
 
     resp = requests.post(api_url, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                         json={"model": model, "messages": messages, "tools": ALPACA_TOOLS, "tool_choice": "auto", "max_tokens": 1024}, timeout=90)
+                         json={"model": model, "messages": messages, "tools": AGENT_TOOLS, "tool_choice": "auto", "max_tokens": 1024}, timeout=90)
     resp.raise_for_status()
     result = resp.json()
     asst_msg = result["choices"][0]["message"]
