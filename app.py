@@ -1,8 +1,10 @@
+import json
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+import requests
 import yaml
 from alpaca_trade_api.rest import REST
 from flask import Flask, jsonify, render_template, request
@@ -10,91 +12,31 @@ from flask import Flask, jsonify, render_template, request
 app = Flask(__name__)
 
 
+# ============== Core Helpers ==============
+
 def load_accounts_from_config(config_path: str = "portfolio_config.yaml") -> List[Dict[str, Any]]:
     config_file = Path(config_path)
     if not config_file.exists():
         return []
-    
     raw = yaml.safe_load(config_file.read_text())
-    accounts = []
-    for entry in raw.get("accounts", []):
-        accounts.append({
-            "name": entry["name"],
-            "key_id": entry["key_id"],
-            "secret_key": entry["secret_key"],
-            "base_url": entry.get("base_url", "https://paper-api.alpaca.markets"),
-        })
-    return accounts
+    return [
+        {"name": e["name"], "key_id": e["key_id"], "secret_key": e["secret_key"],
+         "base_url": e.get("base_url", "https://paper-api.alpaca.markets")}
+        for e in raw.get("accounts", [])
+    ]
 
 
-def calculate_metrics(equity_values: List[float]) -> Dict[str, float]:
-    import numpy as np
-    
-    if len(equity_values) < 2:
-        return {"volatility": 0.0, "sharpe_ratio": 0.0, "max_drawdown": 0.0}
-    
-    equity_array = np.array(equity_values, dtype=float)
-    returns = np.diff(equity_array) / equity_array[:-1]
-    
-    volatility = np.std(returns) * np.sqrt(252) * 100
-    mean_return = np.mean(returns)
-    sharpe_ratio = (mean_return / np.std(returns)) * np.sqrt(252) if np.std(returns) > 0 else 0.0
-    
-    cumulative = np.cumprod(1 + returns)
-    running_max = np.maximum.accumulate(cumulative)
-    drawdown = (cumulative - running_max) / running_max
-    max_drawdown = np.min(drawdown) * 100
-    
-    return {
-        "volatility": float(volatility),
-        "sharpe_ratio": float(sharpe_ratio),
-        "max_drawdown": float(max_drawdown),
-    }
+def get_rest_client(account: Optional[Dict] = None) -> Optional[REST]:
+    """Get REST client for specified account or first available"""
+    if account:
+        return REST(key_id=account["key_id"], secret_key=account["secret_key"], base_url=account["base_url"])
+    accounts = load_accounts_from_config()
+    if not accounts:
+        return None
+    return REST(key_id=accounts[0]["key_id"], secret_key=accounts[0]["secret_key"], base_url=accounts[0]["base_url"])
 
 
-def get_portfolio_history(account: Dict[str, Any], period: str = "1M", timeframe: str = "1D") -> Dict[str, Any]:
-    rest = REST(
-        key_id=account["key_id"],
-        secret_key=account["secret_key"],
-        base_url=account["base_url"]
-    )
-    
-    try:
-        history = rest.get_portfolio_history(period=period, timeframe=timeframe)
-        account_info = rest.get_account()
-        metrics = calculate_metrics(history.equity)
-        
-        equity_values = list(history.equity)
-        initial_equity = equity_values[0] if equity_values else 0
-        pnl_values = [(eq - initial_equity) for eq in equity_values]
-        pnl_pct_values = [((eq - initial_equity) / initial_equity * 100) if initial_equity > 0 else 0 for eq in equity_values]
-        
-        return {
-            "name": account["name"],
-            "timestamps": [datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") for ts in history.timestamp],
-            "equity": history.equity,
-            "pnl": pnl_values,
-            "pnl_pct": pnl_pct_values,
-            "current_equity": float(account_info.equity),
-            "current_cash": float(account_info.cash),
-            "buying_power": float(account_info.buying_power),
-            "volatility": metrics["volatility"],
-            "sharpe_ratio": metrics["sharpe_ratio"],
-            "max_drawdown": metrics["max_drawdown"],
-        }
-    except Exception as e:
-        return {
-            "name": account["name"],
-            "timestamps": [],
-            "equity": [],
-            "pnl": [],
-            "pnl_pct": [],
-            "volatility": 0.0,
-            "sharpe_ratio": 0.0,
-            "max_drawdown": 0.0,
-            "error": str(e)
-        }
-
+# ============== Dashboard API Routes ==============
 
 @app.route("/")
 def index():
@@ -103,349 +45,297 @@ def index():
 
 @app.route("/api/accounts")
 def get_accounts():
-    accounts = load_accounts_from_config()
-    return jsonify([{"name": acc["name"]} for acc in accounts])
-
-
-def get_benchmark_history(symbol: str = "SPY", period: str = "1M", timeframe: str = "1D") -> Dict[str, Any]:
-    accounts = load_accounts_from_config()
-    if not accounts:
-        return {}
-        
-    rest = REST(
-        key_id=accounts[0]["key_id"],
-        secret_key=accounts[0]["secret_key"],
-        base_url=accounts[0]["base_url"]
-    )
-    
-    try:
-        now = datetime.now()
-        if period == "1D":
-            start = now - timedelta(days=1)
-        elif period == "1W":
-            start = now - timedelta(weeks=1)
-        elif period == "1M":
-            start = now - timedelta(days=30)
-        elif period == "3M":
-            start = now - timedelta(days=90)
-        elif period == "1Y":
-            start = now - timedelta(days=365)
-        else:
-            start = now - timedelta(days=365*5)
-            
-        bars = rest.get_bars(symbol, timeframe, start=start.isoformat(), end=now.isoformat(), limit=10000).df
-        
-        if bars.empty:
-            return {}
-        
-        return {
-            "symbol": symbol,
-            "timestamps": [ts.strftime("%Y-%m-%d %H:%M") for ts in bars.index],
-            "close": bars["close"].tolist()
-        }
-    except Exception as e:
-        return {}
-
-
-def calculate_beta(portfolio_returns: List[float], benchmark_returns: List[float]) -> float:
-    import numpy as np
-    
-    if len(portfolio_returns) != len(benchmark_returns) or len(portfolio_returns) < 2:
-        return 0.0
-        
-    min_len = min(len(portfolio_returns), len(benchmark_returns))
-    p_ret = np.array(portfolio_returns[:min_len])
-    b_ret = np.array(benchmark_returns[:min_len])
-    
-    covariance = np.cov(p_ret, b_ret)[0][1]
-    variance = np.var(b_ret)
-    
-    return covariance / variance if variance > 0 else 0.0
+    return jsonify([{"name": acc["name"]} for acc in load_accounts_from_config()])
 
 
 @app.route("/api/portfolio-history/<period>")
 def portfolio_history(period: str = "1M"):
-    benchmark_symbol = request.args.get('benchmark', 'SPY')
+    import numpy as np
     
-    timeframe_map = {
-        "1D": "5Min",
-        "1W": "1H",
-        "1M": "1D",
-        "3M": "1D",
-        "1Y": "1D",
-        "all": "1W"
-    }
-    
+    def calc_metrics(equity_values):
+        if len(equity_values) < 2:
+            return {"volatility": 0.0, "sharpe_ratio": 0.0, "max_drawdown": 0.0}
+        arr = np.array(equity_values, dtype=float)
+        returns = np.diff(arr) / arr[:-1]
+        vol = np.std(returns) * np.sqrt(252) * 100
+        sharpe = (np.mean(returns) / np.std(returns)) * np.sqrt(252) if np.std(returns) > 0 else 0.0
+        cumul = np.cumprod(1 + returns)
+        dd = (cumul - np.maximum.accumulate(cumul)) / np.maximum.accumulate(cumul)
+        return {"volatility": float(vol), "sharpe_ratio": float(sharpe), "max_drawdown": float(np.min(dd) * 100)}
+
+    timeframe_map = {"1D": "5Min", "1W": "1H", "1M": "1D", "3M": "1D", "1Y": "1D", "all": "1W"}
     timeframe = timeframe_map.get(period, "1D")
     accounts = load_accounts_from_config()
-    
     if not accounts:
         return jsonify({"error": "No accounts configured"}), 404
-    
+
+    histories = []
+    for account in accounts:
+        rest = get_rest_client(account)
+        try:
+            history = rest.get_portfolio_history(period=period, timeframe=timeframe)
+            acc_info = rest.get_account()
+            metrics = calc_metrics(history.equity)
+            eq = list(history.equity)
+            init = eq[0] if eq else 0
+            histories.append({
+                "name": account["name"],
+                "timestamps": [datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") for ts in history.timestamp],
+                "equity": history.equity, "pnl": [(e - init) for e in eq],
+                "pnl_pct": [((e - init) / init * 100) if init > 0 else 0 for e in eq],
+                "current_equity": float(acc_info.equity), "current_cash": float(acc_info.cash),
+                "buying_power": float(acc_info.buying_power), **metrics
+            })
+        except Exception as e:
+            histories.append({"name": account["name"], "error": str(e), "timestamps": [], "equity": [], "pnl": [], "pnl_pct": []})
+
+    # Benchmark
     benchmark_data = {}
+    benchmark_symbol = request.args.get('benchmark', 'SPY')
     if benchmark_symbol != 'None':
-        benchmark_data = get_benchmark_history(benchmark_symbol, period, timeframe)
-    
-    histories = [get_portfolio_history(account, period=period, timeframe=timeframe) for account in accounts]
-    
-    return jsonify({
-        "accounts": histories,
-        "benchmark": benchmark_data
-    })
+        rest = get_rest_client()
+        if rest:
+            try:
+                period_days = {"1D": 1, "1W": 7, "1M": 30, "3M": 90, "1Y": 365}.get(period, 365*5)
+                start = datetime.now() - timedelta(days=period_days)
+                bars = rest.get_bars(benchmark_symbol, timeframe, start=start.isoformat(), limit=10000).df
+                if not bars.empty:
+                    benchmark_data = {"symbol": benchmark_symbol, "timestamps": [ts.strftime("%Y-%m-%d %H:%M") for ts in bars.index], "close": bars["close"].tolist()}
+            except Exception:
+                pass
+
+    return jsonify({"accounts": histories, "benchmark": benchmark_data})
 
 
 @app.route("/api/account-summary")
 def account_summary():
     accounts = load_accounts_from_config()
     summaries = []
-    
+    rest = None
     for account in accounts:
-        rest = REST(
-            key_id=account["key_id"],
-            secret_key=account["secret_key"],
-            base_url=account["base_url"]
-        )
-        
+        rest = get_rest_client(account)
         try:
-            acc_info = rest.get_account()
+            acc = rest.get_account()
             positions = rest.list_positions()
-            
-            current_equity = float(acc_info.equity)
-            last_equity = float(acc_info.last_equity)
-            day_pnl = current_equity - last_equity
-            
+            day_pnl = float(acc.equity) - float(acc.last_equity)
             summaries.append({
-                "name": account["name"],
-                "equity": current_equity,
-                "cash": float(acc_info.cash),
-                "buying_power": float(acc_info.buying_power),
-                "portfolio_value": float(acc_info.portfolio_value),
-                "positions_count": len(positions),
-                "day_profit_loss": day_pnl,
-                "day_profit_loss_pct": (day_pnl / last_equity * 100) if last_equity > 0 else 0,
+                "name": account["name"], "equity": float(acc.equity), "cash": float(acc.cash),
+                "buying_power": float(acc.buying_power), "portfolio_value": float(acc.portfolio_value),
+                "positions_count": len(positions), "day_profit_loss": day_pnl,
+                "day_profit_loss_pct": (day_pnl / float(acc.last_equity) * 100) if float(acc.last_equity) > 0 else 0
             })
         except Exception as e:
             summaries.append({"name": account["name"], "error": str(e)})
-        
-    try:
-        if accounts:
+    
+    # Add SPY benchmark
+    if rest:
+        try:
             spy_trade = rest.get_latest_trade("SPY")
             spy_bars = rest.get_bars("SPY", "1D", limit=2).df
-            
-            if not spy_bars.empty and len(spy_bars) >= 2:
-                prev_close = spy_bars.iloc[-2]["close"]
-                current_price = float(spy_trade.price)
-                spy_change = current_price - prev_close
-                spy_change_pct = (spy_change / prev_close) * 100
-                
-                summaries.append({
-                    "name": "S&P 500 (SPY)",
-                    "equity": current_price,
-                    "day_profit_loss": spy_change,
-                    "day_profit_loss_pct": spy_change_pct,
-                    "is_market": True
-                })
-    except Exception:
-        pass
-    
+            if len(spy_bars) >= 2:
+                prev = spy_bars.iloc[-2]["close"]
+                curr = float(spy_trade.price)
+                summaries.append({"name": "S&P 500 (SPY)", "equity": curr, "day_profit_loss": curr - prev,
+                                  "day_profit_loss_pct": (curr - prev) / prev * 100, "is_market": True})
+        except Exception:
+            pass
     return jsonify(summaries)
-
-
-def get_asset_class(symbol: str) -> str:
-    ASSET_CLASSES = {
-        "Equity": ["VOO", "QQQ", "VEA", "VWO"],
-        "Fixed Income": ["VTEB", "TIP", "IEF", "SHYG", "BND"],
-        "Real Estate": ["VNQ"],
-        "Commodities": ["GLD"],
-    }
-    
-    for category, symbols in ASSET_CLASSES.items():
-        if symbol in symbols:
-            return category
-    return "Other"
-
-
-@app.route("/api/chat", methods=["POST"])
-def chat():
-    """
-    Chatbot API endpoint - supports DeepSeek, Qwen3-Max, and GPT-4.
-    Configure API keys in Render environment variables:
-    - DEEPSEEK_API_KEY for DeepSeek
-    - DASHSCOPE_API_KEY for Qwen3-Max
-    - OPENAI_API_KEY for GPT-4
-    """
-    import traceback
-    
-    data = request.get_json()
-    message = data.get("message", "")
-    model = data.get("model", "deepseek")  # Default to DeepSeek
-    history = data.get("history", [])
-    
-    try:
-        if model == "gpt-4":
-            api_key = os.environ.get("OPENAI_API_KEY")
-            if not api_key:
-                return jsonify({"response": "⚠️ OpenAI API key not configured. Add OPENAI_API_KEY to Render environment variables."})
-            response = call_openai(message, history, api_key)
-        elif model == "qwen3-max":
-            api_key = os.environ.get("DASHSCOPE_API_KEY")
-            if not api_key:
-                return jsonify({"response": "⚠️ DashScope API key not configured. Add DASHSCOPE_API_KEY to Render environment variables."})
-            response = call_qwen(message, history, api_key)
-        else:  # DeepSeek (default)
-            api_key = os.environ.get("DEEPSEEK_API_KEY")
-            if not api_key:
-                return jsonify({"response": "⚠️ DeepSeek API key not configured. Add DEEPSEEK_API_KEY to Render environment variables."})
-            response = call_deepseek(message, history, api_key)
-        
-        return jsonify({"response": response})
-    except Exception as e:
-        error_details = traceback.format_exc()
-        print(f"Chat error: {error_details}")
-        return jsonify({"response": f"Error: {str(e)}"}), 500
-
-
-def call_openai(message: str, history: list, api_key: str) -> str:
-    """Call OpenAI GPT-5.1 API"""
-    import requests
-    
-    # Build conversation context
-    context = "You are a helpful portfolio assistant that helps users understand their investments, market trends, and trading strategies. Be concise and helpful.\n\n"
-    for m in history[-10:]:
-        role = "User" if m["role"] == "user" else "Assistant"
-        context += f"{role}: {m['content']}\n"
-    context += f"User: {message}"
-    
-    response = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "gpt-5.1",
-            "input": context,
-            "reasoning": {"effort": "low"},
-            "text": {"verbosity": "low"}
-        },
-        timeout=90
-    )
-    response.raise_for_status()
-    return response.json()["output_text"]
-
-
-def call_deepseek(message: str, history: list, api_key: str) -> str:
-    """Call DeepSeek V3.2-Exp API (OpenAI-compatible)"""
-    import requests
-    
-    messages = [{"role": "system", "content": "You are a helpful portfolio assistant that helps users understand their investments, market trends, and trading strategies. Be concise and helpful."}]
-    messages.extend([{"role": m["role"], "content": m["content"]} for m in history[-10:]])
-    messages.append({"role": "user", "content": message})
-    
-    response = requests.post(
-        "https://api.deepseek.com/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "deepseek-chat",  # DeepSeek V3.2-Exp (latest)
-            "messages": messages,
-            "max_tokens": 1024,
-            "temperature": 0.7
-        },
-        timeout=90
-    )
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
-
-
-def call_qwen(message: str, history: list, api_key: str) -> str:
-    """Call Qwen3-Max via Alibaba DashScope API (OpenAI-compatible)"""
-    import requests
-    
-    messages = [{"role": "system", "content": "You are a helpful portfolio assistant that helps users understand their investments, market trends, and trading strategies. Be concise and helpful."}]
-    messages.extend([{"role": m["role"], "content": m["content"]} for m in history[-10:]])
-    messages.append({"role": "user", "content": message})
-    
-    response = requests.post(
-        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "qwen-max",
-            "messages": messages,
-            "max_tokens": 500,
-            "temperature": 0.7
-        },
-        timeout=60
-    )
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
 
 
 @app.route("/api/risk-metrics")
 def risk_metrics():
-    accounts = load_accounts_from_config()
-    
-    asset_allocation = {
-        "Equity": 0.0,
-        "Fixed Income": 0.0,
-        "Real Estate": 0.0,
-        "Commodities": 0.0,
-        "Other": 0.0,
-        "Cash": 0.0
-    }
-    
+    ASSET_MAP = {"VOO": "Equity", "QQQ": "Equity", "VEA": "Equity", "VWO": "Equity",
+                 "VTEB": "Fixed Income", "TIP": "Fixed Income", "IEF": "Fixed Income", "SHYG": "Fixed Income", "BND": "Fixed Income",
+                 "VNQ": "Real Estate", "GLD": "Commodities"}
+    allocation = {"Equity": 0.0, "Fixed Income": 0.0, "Real Estate": 0.0, "Commodities": 0.0, "Other": 0.0, "Cash": 0.0}
     all_positions = []
-    
-    for account in accounts:
-        rest = REST(
-            key_id=account["key_id"],
-            secret_key=account["secret_key"],
-            base_url=account["base_url"]
-        )
-        
+
+    for account in load_accounts_from_config():
+        rest = get_rest_client(account)
         try:
             positions = rest.list_positions()
-            account_info = rest.get_account()
-            
-            asset_allocation["Cash"] += float(account_info.cash)
-            
+            allocation["Cash"] += float(rest.get_account().cash)
             for pos in positions:
-                market_value = float(pos.market_value)
-                symbol = pos.symbol
-                asset_class = get_asset_class(symbol)
-                
-                if asset_class in asset_allocation:
-                    asset_allocation[asset_class] += market_value
-                else:
-                    asset_allocation["Other"] += market_value
-                
-                all_positions.append({
-                    "symbol": symbol,
-                    "market_value": market_value,
-                    "pl_pct": float(pos.unrealized_plpc) * 100,
-                    "pl_day_pct": float(pos.change_today) * 100,
-                    "account": account["name"]
-                })
-                
+                mv = float(pos.market_value)
+                cls = ASSET_MAP.get(pos.symbol, "Other")
+                allocation[cls] += mv
+                all_positions.append({"symbol": pos.symbol, "market_value": mv,
+                                      "pl_pct": float(pos.unrealized_plpc) * 100,
+                                      "pl_day_pct": float(pos.change_today) * 100, "account": account["name"]})
         except Exception:
             pass
-            
-    top_gainers = sorted(all_positions, key=lambda x: x["pl_day_pct"], reverse=True)[:5]
-    top_losers = sorted(all_positions, key=lambda x: x["pl_day_pct"])[:5]
-    
+
     return jsonify({
-        "allocation": asset_allocation,
-        "top_gainers": top_gainers,
-        "top_losers": top_losers
+        "allocation": allocation,
+        "top_gainers": sorted(all_positions, key=lambda x: x["pl_day_pct"], reverse=True)[:5],
+        "top_losers": sorted(all_positions, key=lambda x: x["pl_day_pct"])[:5]
     })
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(debug=False, host="0.0.0.0", port=port)
+# ============== Chatbot with Function Calling ==============
 
+ALPACA_TOOLS = [
+    {"type": "function", "function": {"name": "get_account_info", "description": "Get account balance, equity, cash, buying power, and daily P/L",
+        "parameters": {"type": "object", "properties": {"account_name": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "get_positions", "description": "Get all current stock positions/holdings with quantities, prices, and P/L",
+        "parameters": {"type": "object", "properties": {"account_name": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "get_stock_quote", "description": "Get the latest price quote for a stock symbol",
+        "parameters": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}}},
+    {"type": "function", "function": {"name": "place_order", "description": "Place a market order to buy or sell stocks",
+        "parameters": {"type": "object", "properties": {"symbol": {"type": "string"}, "qty": {"type": "integer"}, "side": {"type": "string", "enum": ["buy", "sell"]}}, "required": ["symbol", "qty", "side"]}}},
+    {"type": "function", "function": {"name": "get_orders", "description": "Get recent orders",
+        "parameters": {"type": "object", "properties": {"status": {"type": "string", "enum": ["open", "closed", "all"]}}, "required": []}}},
+    {"type": "function", "function": {"name": "get_market_status", "description": "Check if the stock market is open or closed",
+        "parameters": {"type": "object", "properties": {}, "required": []}}}
+]
+
+
+def execute_tool(name: str, args: dict) -> str:
+    accounts = load_accounts_from_config()
+    if not accounts:
+        return "No trading accounts configured."
+    
+    if name == "get_account_info":
+        results = []
+        for acc in accounts:
+            if args.get("account_name") and acc["name"] != args["account_name"]:
+                continue
+            try:
+                rest = get_rest_client(acc)
+                info = rest.get_account()
+                pnl = float(info.equity) - float(info.last_equity)
+                results.append(f"Account: {acc['name']}\n• Equity: ${float(info.equity):,.2f}\n• Cash: ${float(info.cash):,.2f}\n• Buying Power: ${float(info.buying_power):,.2f}\n• Day P/L: ${pnl:+,.2f}")
+            except Exception as e:
+                results.append(f"{acc['name']}: Error - {e}")
+        return "\n\n".join(results) or "Account not found."
+
+    elif name == "get_positions":
+        results = []
+        for acc in accounts:
+            if args.get("account_name") and acc["name"] != args["account_name"]:
+                continue
+            try:
+                positions = get_rest_client(acc).list_positions()
+                if not positions:
+                    results.append(f"{acc['name']}: No positions")
+                else:
+                    lines = [f"{acc['name']} - {len(positions)} positions:"]
+                    for p in positions:
+                        lines.append(f"• {p.symbol}: {p.qty} @ ${float(p.current_price):,.2f} | P/L: {float(p.unrealized_plpc)*100:+.2f}%")
+                    results.append("\n".join(lines))
+            except Exception as e:
+                results.append(f"{acc['name']}: Error - {e}")
+        return "\n\n".join(results) or "Account not found."
+
+    elif name == "get_stock_quote":
+        try:
+            rest = get_rest_client()
+            symbol = args["symbol"].upper()
+            price = float(rest.get_latest_trade(symbol).price)
+            bars = rest.get_bars(symbol, "1D", limit=2).df
+            if len(bars) >= 2:
+                chg = price - bars.iloc[-2]["close"]
+                return f"{symbol}: ${price:,.2f} ({chg:+.2f}, {chg/bars.iloc[-2]['close']*100:+.2f}%)"
+            return f"{symbol}: ${price:,.2f}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    elif name == "place_order":
+        try:
+            order = get_rest_client().submit_order(symbol=args["symbol"].upper(), qty=args["qty"], side=args["side"], type="market", time_in_force="day")
+            return f"✅ Order placed: {args['side'].upper()} {args['qty']} {args['symbol'].upper()} | ID: {order.id}"
+        except Exception as e:
+            return f"❌ Order failed: {e}"
+
+    elif name == "get_orders":
+        results = []
+        status = args.get("status", "open")
+        for acc in accounts:
+            try:
+                orders = get_rest_client(acc).list_orders(status=status, limit=10)
+                if not orders:
+                    results.append(f"{acc['name']}: No {status} orders")
+                else:
+                    lines = [f"{acc['name']} - {status} orders:"]
+                    for o in orders:
+                        lines.append(f"• {o.side.upper()} {o.qty} {o.symbol} | {o.status}")
+                    results.append("\n".join(lines))
+            except Exception as e:
+                results.append(f"{acc['name']}: Error - {e}")
+        return "\n\n".join(results)
+
+    elif name == "get_market_status":
+        try:
+            clock = get_rest_client().get_clock()
+            return f"Market: {'🟢 OPEN' if clock.is_open else '🔴 CLOSED'}\nNext Open: {clock.next_open}\nNext Close: {clock.next_close}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    return f"Unknown tool: {name}"
+
+
+def call_llm_with_tools(message: str, history: list, api_key: str, api_url: str, model: str) -> str:
+    """Unified LLM caller with function calling for DeepSeek/Qwen"""
+    system = "You are a portfolio assistant with trading tools. Use them when needed. Be concise."
+    messages = [{"role": "system", "content": system}]
+    messages.extend([{"role": m["role"], "content": m["content"]} for m in history[-10:]])
+    messages.append({"role": "user", "content": message})
+
+    resp = requests.post(api_url, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                         json={"model": model, "messages": messages, "tools": ALPACA_TOOLS, "tool_choice": "auto", "max_tokens": 1024}, timeout=90)
+    resp.raise_for_status()
+    result = resp.json()
+    asst_msg = result["choices"][0]["message"]
+
+    if asst_msg.get("tool_calls"):
+        messages.append(asst_msg)
+        for tc in asst_msg["tool_calls"]:
+            tool_result = execute_tool(tc["function"]["name"], json.loads(tc["function"]["arguments"]))
+            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+        resp = requests.post(api_url, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                             json={"model": model, "messages": messages, "max_tokens": 1024}, timeout=90)
+        resp.raise_for_status()
+        result = resp.json()
+
+    return result["choices"][0]["message"]["content"]
+
+
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    data = request.get_json()
+    message, model, history = data.get("message", ""), data.get("model", "deepseek"), data.get("history", [])
+
+    MODEL_CONFIG = {
+        "deepseek": ("DEEPSEEK_API_KEY", "https://api.deepseek.com/chat/completions", "deepseek-chat"),
+        "qwen3-max": ("DASHSCOPE_API_KEY", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions", "qwen-max"),
+    }
+
+    if model in MODEL_CONFIG:
+        env_key, api_url, model_name = MODEL_CONFIG[model]
+        api_key = os.environ.get(env_key)
+        if not api_key:
+            return jsonify({"response": f"⚠️ {env_key} not configured."})
+        try:
+            return jsonify({"response": call_llm_with_tools(message, history, api_key, api_url, model_name)})
+        except Exception as e:
+            return jsonify({"response": f"Error: {e}"}), 500
+
+    # GPT fallback (no function calling)
+    if model == "gpt-4":
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            return jsonify({"response": "⚠️ OPENAI_API_KEY not configured."})
+        try:
+            context = "You are a portfolio assistant.\n" + "\n".join([f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}" for m in history[-10:]]) + f"\nUser: {message}"
+            resp = requests.post("https://api.openai.com/v1/responses", headers={"Authorization": f"Bearer {api_key}"},
+                                 json={"model": "gpt-5.1", "input": context}, timeout=90)
+            resp.raise_for_status()
+            return jsonify({"response": resp.json()["output_text"]})
+        except Exception as e:
+            return jsonify({"response": f"Error: {e}"}), 500
+
+    return jsonify({"response": "Unknown model."})
+
+
+if __name__ == "__main__":
+    app.run(debug=False, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
